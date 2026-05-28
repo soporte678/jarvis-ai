@@ -4,7 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <title>JARVIS AI</title>
-<!-- build: v2.4 1780009019 -->
 <style>
 *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 body{background:#070714;color:#d0d0ff;font-family:-apple-system,BlinkMacSystemFont,sans-serif;height:100dvh;display:flex;flex-direction:column;overflow:hidden}
@@ -15,6 +14,7 @@ body{background:#070714;color:#d0d0ff;font-family:-apple-system,BlinkMacSystemFo
 .st.err{background:#3a1a1a;color:#f87171}
 .st.load{background:#1a2a4a;color:#60a5fa}
 .st.wake{background:#3a2a1a;color:#fbbf24}
+.st.conv{background:#1a2a3a;color:#38bdf8}
 .chat{flex:1;overflow-y:auto;padding:10px;display:flex;flex-direction:column;gap:8px}
 .msg{max-width:88%;padding:10px 14px;border-radius:16px;font-size:14px;line-height:1.45;word-break:break-word;animation:pop .25s ease}
 .msg.u{align-self:flex-end;background:#1d4ed8;color:#fff;border-bottom-right-radius:4px}
@@ -28,11 +28,13 @@ body{background:#070714;color:#d0d0ff;font-family:-apple-system,BlinkMacSystemFo
 .mic-btn{width:40px;height:40px;border-radius:50%;border:none;background:#1a3a2a;color:#4ade80;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:all .3s}
 .mic-btn.on{background:#3a1a1a;color:#f87171;animation:pu 1s infinite}
 .mic-btn.wake{background:#3a2a1a;color:#fbbf24;animation:glow 1.5s infinite}
+.mic-btn.conv{background:#1a3a4a;color:#38bdf8;animation:glow 1.5s infinite}
 .typing{font-size:12px;color:#60a5fa;padding:4px 12px;font-style:italic}
 .wake-indicator{text-align:center;padding:6px;font-size:12px;color:#fbbf24;background:#1a1a0e;border-bottom:1px solid #2a2a1e}
+.conv-indicator{text-align:center;padding:6px;font-size:12px;color:#38bdf8;background:#0a1a2a;border-bottom:1px solid #1a2a3a}
 @keyframes pop{from{opacity:0;transform:scale(.92)}to{opacity:1;transform:scale(1)}}
 @keyframes pu{0%,100%{opacity:1}50%{opacity:.5}}
-@keyframes glow{0%,100%{box-shadow:0 0 5px #fbbf24}50%{box-shadow:0 0 15px #fbbf24}}
+@keyframes glow{0%,100%{box-shadow:0 0 5px currentColor}50%{box-shadow:0 0 15px currentColor}}
 @media(min-width:768px){.msg{max-width:65%}}
 </style>
 </head>
@@ -41,7 +43,14 @@ body{background:#070714;color:#d0d0ff;font-family:-apple-system,BlinkMacSystemFo
   <h1>JARVIS</h1>
   <span id="st" class="st ok">Listo</span>
 </div>
-<div id="wakeBar" class="wake-indicator" style="display:none">👂 Escuchando... Decí "JARVIS" para hablar</div>
+<div id="wakeBar" class="wake-indicator" style="display:none">
+  <span id="wakeText">👂 Decí "JARVIS" para hablar...</span>
+  <span id="wakeTimer" style="font-weight:bold;margin-left:8px"></span>
+</div>
+<div id="convBar" class="conv-indicator" style="display:none">
+  💬 Modo conversación — hablá libremente
+  <span id="convTimer" style="font-weight:bold;margin-left:8px">15s</span>
+</div>
 <div id="chat" class="chat"></div>
 <div id="typing" class="typing" style="display:none">...</div>
 <div class="input-row">
@@ -51,8 +60,11 @@ body{background:#070714;color:#d0d0ff;font-family:-apple-system,BlinkMacSystemFo
 </div>
 <script>
 // === STATE ===
-let msgs=[],busy=false,micActive=false,wakeWordMode=false,recog=null,lastReply="";
+let msgs=[],busy=false,micActive=false,wakeWordMode=false,convMode=false,recog=null,lastReply="";
+let convTimer=null,convCountdown=null;
 try{msgs=JSON.parse(localStorage.getItem("jv")||"[]")}catch(e){msgs=[]}
+const CONV_TIMEOUT=15000; // 15 seconds of conversation mode
+const WAKE_TIMEOUT=12000; // 12 seconds to speak after "JARVIS"
 
 // === INIT ===
 function init(){
@@ -61,80 +73,173 @@ function init(){
     recog=new SR();
     recog.lang='es-ES';
     recog.continuous=true;
-    recog.interimResults=false;
+    recog.interimResults=true; // CAPTURE words as they are spoken
     recog.maxAlternatives=1;
 
-    recog.onresult=(e)=>{
-      const txt=e.results[e.results.length-1][0].transcript.trim();
-      console.log("Heard:",txt);
+    let finalTranscript='';
+    let interimTranscript='';
 
-      if(wakeWordMode){
-        // After wake word detected, process the command
-        document.getElementById("msg").value=txt;
-        wakeWordMode=false;
-        updateMicButton();
-        send();
-      } else if(/\bjarvis\b/i.test(txt)){
-        // Wake word detected!
-        const cmd=txt.replace(/\bjarvis\b/gi,"").trim();
-        if(cmd){
-          // JARVIS + command in same sentence
-          document.getElementById("msg").value=cmd;
-          send();
-        } else {
-          // Just said "JARVIS" - enter wake mode
-          wakeWordMode=true;
-          updateMicButton();
-          showSt("Te escucho...","wake");
-          speak("Te escucho");
-          // Auto-send after 5 seconds if no command
-          setTimeout(()=>{
-            if(wakeWordMode){
-              wakeWordMode=false;
-              updateMicButton();
-              showSt("Listo","ok");
-            }
-          },5000);
+    recog.onresult=(e)=>{
+      interimTranscript='';
+      for(let i=e.resultIndex;i<e.results.length;i++){
+        if(e.results[i].isFinal){
+          finalTranscript+=e.results[i][0].transcript;
+        }else{
+          interimTranscript+=e.results[i][0].transcript;
         }
       }
-      // If NOT JARVIS, ignore completely
+
+      const finalTxt=finalTranscript.trim();
+      const interimTxt=interimTranscript.trim();
+
+      // Show interim text in input for feedback
+      if(interimTxt && (wakeWordMode || convMode)){
+        document.getElementById("msg").value=interimTxt;
+      }
+
+      if(finalTxt){
+        console.log("Final:",finalTxt,"| Wake:",wakeWordMode,"| Conv:",convMode);
+        handleVoiceInput(finalTxt);
+        finalTranscript='';
+      }
     };
 
     recog.onerror=(e)=>{
       console.log("Mic error:",e.error);
-      if(e.error==="no-speech") return; // Ignore no-speech errors
-      if(micActive) setTimeout(()=>{try{recog.start()}catch(e){}},500);
+      if(e.error==="no-speech") return;
+      if(e.error==="aborted") return;
+      if(e.error==="audio-capture"){
+        showSt("Sin micrófono","err");
+        return;
+      }
+      if(micActive){
+        setTimeout(()=>{try{recog.start()}catch(e){}},600);
+      }
     };
 
     recog.onend=()=>{
-      // RESTART immediately - always listening!
       if(micActive){
-        try{recog.start()}catch(e){setTimeout(()=>{try{recog.start()}catch(e){}},200);}
+        // Longer delay on mobile to let TTS finish before restarting mic
+        const delay=/iPhone|iPad|iPod/.test(navigator.userAgent)?800:300;
+        setTimeout(()=>{
+          try{recog.start()}catch(e){
+            setTimeout(()=>{try{recog.start()}catch(e){}},400);
+          }
+        },delay);
       }
     };
   }
   render();
 }
 
+// === VOICE INPUT HANDLER ===
+function handleVoiceInput(txt){
+  if(convMode){
+    // CONVERSATION MODE: everything goes to JARVIS
+    document.getElementById("msg").value=txt;
+    resetConvTimer();
+    send();
+  }else if(wakeWordMode){
+    // WAKE MODE: JARVIS was said, now listening for command
+    document.getElementById("msg").value=txt;
+    wakeWordMode=false;
+    updateMicButton();
+    hideWakeBar();
+    send();
+  }else if(/\bjarvis\b/i.test(txt)){
+    // WAKE WORD DETECTED
+    const cmd=txt.replace(/\bjarvis\b/gi,"").trim();
+    if(cmd){
+      // "JARVIS do something" - command included
+      document.getElementById("msg").value=cmd;
+      send();
+    }else{
+      // Just "JARVIS" - enter conversation mode
+      enterConversationMode();
+    }
+  }
+  // If not JARVIS and not in conversation mode, ignore
+}
+
+// === CONVERSATION MODE ===
+function enterConversationMode(){
+  wakeWordMode=false;
+  convMode=true;
+  updateMicButton();
+  showSt("Conversación","conv");
+  document.getElementById("convBar").style.display="block";
+  document.getElementById("wakeBar").style.display="none";
+
+  // Short beep instead of "Te escucho" to not interfere with mic
+  beep();
+
+  resetConvTimer();
+}
+
+function resetConvTimer(){
+  // Clear existing timers
+  if(convTimer){clearTimeout(convTimer);convTimer=null;}
+  if(convCountdown){clearInterval(convCountdown);convCountdown=null;}
+
+  let remaining=CONV_TIMEOUT/1000;
+  document.getElementById("convTimer").textContent=remaining+"s";
+
+  convCountdown=setInterval(()=>{
+    remaining--;
+    document.getElementById("convTimer").textContent=remaining+"s";
+    if(remaining<=0) clearInterval(convCountdown);
+  },1000);
+
+  convTimer=setTimeout(()=>{
+    convMode=false;
+    clearInterval(convCountdown);
+    document.getElementById("convBar").style.display="none";
+    updateMicButton();
+    showSt("Escuchando - decí JARVIS","wake");
+  },CONV_TIMEOUT);
+}
+
+function exitConversationMode(){
+  convMode=false;
+  wakeWordMode=false;
+  if(convTimer){clearTimeout(convTimer);convTimer=null;}
+  if(convCountdown){clearInterval(convCountdown);convCountdown=null;}
+  document.getElementById("convBar").style.display="none";
+  document.getElementById("wakeBar").style.display="none";
+}
+
+// === SHORT BEEP ===
+function beep(){
+  try{
+    const ctx=new (window.AudioContext||window.webkitAudioContext)();
+    const osc=ctx.createOscillator();
+    const gain=ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.frequency.value=880;
+    gain.gain.value=0.1;
+    osc.start();
+    gain.gain.exponentialRampToValueAtTime(0.001,ctx.currentTime+0.15);
+    osc.stop(ctx.currentTime+0.15);
+  }catch(e){/* fallback: do nothing */}
+}
+
 // === MIC CONTROL ===
 function toggleMic(){
-  if(!recog){alert("Usa Chrome para voz");return}
+  if(!recog){alert("Usá Chrome o Safari para voz");return;}
   micActive=!micActive;
-  const btn=document.getElementById("mic");
-  const bar=document.getElementById("wakeBar");
-
   if(micActive){
     wakeWordMode=false;
-    btn.className="mic-btn wake";
-    btn.textContent="👂";
-    bar.style.display="block";
+    exitConversationMode();
+    updateMicButton();
+    document.getElementById("wakeBar").style.display="block";
+    document.getElementById("wakeText").textContent="👂 Decí \"JARVIS\" para hablar...";
     showSt("Escuchando - decí JARVIS","wake");
     try{recog.start()}catch(e){}
-  } else {
+  }else{
     wakeWordMode=false;
-    btn.className="mic-btn";
-    btn.textContent="🎤";
-    bar.style.display="none";
+    exitConversationMode();
+    updateMicButton();
     showSt("Listo","ok");
     try{recog.stop()}catch(e){}
   }
@@ -142,16 +247,23 @@ function toggleMic(){
 
 function updateMicButton(){
   const btn=document.getElementById("mic");
-  if(wakeWordMode){
+  if(convMode){
+    btn.className="mic-btn conv";
+    btn.textContent="💬";
+  }else if(wakeWordMode){
     btn.className="mic-btn on";
     btn.textContent="⚡";
-  } else if(micActive){
+  }else if(micActive){
     btn.className="mic-btn wake";
     btn.textContent="👂";
-  } else {
+  }else{
     btn.className="mic-btn";
     btn.textContent="🎤";
   }
+}
+
+function hideWakeBar(){
+  document.getElementById("wakeBar").style.display="none";
 }
 
 // === TTS ===
@@ -161,7 +273,7 @@ function speak(t){
     const u=new SpeechSynthesisUtterance(t.substring(0,300));
     u.lang='es-ES';u.rate=1;u.pitch=1;
     const voices=window.speechSynthesis.getVoices();
-    const v=voices.find(x=>x.lang.startsWith('es'));
+    const v=voices.find(x=>x.lang&&x.lang.startsWith('es'));
     if(v)u.voice=v;
     window.speechSynthesis.speak(u);
   }
@@ -210,14 +322,16 @@ async function send(){
     if(!resp.ok){
       const err=await resp.json();
       const msg=err.detail||err.error||"Error del servidor";
-      msgs.push({role:"assistant",text:"⚠️ "+msg+"\n\nPara usar ChatGPT (más rápido): andá a platform.openai.com/api-keys, creá una key gratuita y pasamela.",source:"error",t:Date.now()});
+      msgs.push({role:"assistant",text:"⚠️ "+msg,source:"error",t:Date.now()});
       showSt("Error","err");
     }else{
       const data=await resp.json();
       msgs.push({role:"assistant",text:data.reply,source:data.source,t:Date.now()});
-      showSt("Listo","ok");
+      showSt(convMode?"Conversación":"Listo",convMode?"conv":"ok");
       lastReply=data.reply;
       speak(data.reply);
+      // If in conversation mode, reset timer after response
+      if(convMode) resetConvTimer();
     }
   }catch(e){
     document.getElementById("typing").style.display="none";
