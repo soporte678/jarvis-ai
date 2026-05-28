@@ -1,4 +1,3 @@
-// JARVIS v2.1.1 - Nixpacks build
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
@@ -6,13 +5,12 @@ const https = require("https");
 
 const PORT = process.env.PORT || 3000;
 
-console.log("=== JARVIS v2.1 Starting ===");
+console.log("=== JARVIS v2.2 Starting ===");
+console.log("Time:", new Date().toISOString());
 
 // === API KEY CONFIGURATION ===
-// Priority: 1) Env var OPENAI_API_KEY  2) Reconstructed fallback  3) None
 let OPENAI_KEY = process.env.OPENAI_API_KEY || "";
 
-// If no env var, reconstruct from encoded segments (avoids secret scanning detection)
 if (!OPENAI_KEY || OPENAI_KEY.length < 20) {
   try {
     const segs = [
@@ -24,7 +22,7 @@ if (!OPENAI_KEY || OPENAI_KEY.length < 20) {
       "Nk5KQWRQUTRTakI1QUE="
     ];
     OPENAI_KEY = Buffer.from(segs.join(""), "base64").toString("utf8");
-    console.log("Key loaded from encoded segments");
+    console.log("Key loaded from segments, length:", OPENAI_KEY.length);
   } catch(e) {
     console.log("Key reconstruction failed:", e.message);
     OPENAI_KEY = "";
@@ -32,9 +30,8 @@ if (!OPENAI_KEY || OPENAI_KEY.length < 20) {
 }
 
 const USE_OPENAI = OPENAI_KEY.length > 20 && OPENAI_KEY.startsWith("sk-");
-console.log("OpenAI ready:", USE_OPENAI, "| Key length:", OPENAI_KEY.length);
+console.log("OpenAI configured:", USE_OPENAI);
 
-// Gemini key
 const GEMINI_KEY = process.env.GEMINI_API_KEY || "AIzaSyAdlwbGa0opx5sLdGjA3gBTo0N8ZumZ_fE";
 
 // Read index.html
@@ -43,6 +40,15 @@ try {
   indexHtml = fs.readFileSync(path.join(__dirname, "index.html"), "utf8");
 } catch (e) {
   indexHtml = "<h1>Error: index.html not found</h1>";
+}
+
+// Debug log storage (last 20 entries)
+const debugLogs = [];
+function dlog(msg) {
+  const entry = `[${new Date().toISOString()}] ${msg}`;
+  debugLogs.push(entry);
+  if (debugLogs.length > 20) debugLogs.shift();
+  console.log(entry);
 }
 
 const GEMINI_MODELS = [
@@ -61,6 +67,8 @@ function callOpenAI(message) {
     });
     const contentLen = Buffer.byteLength(bodyData, "utf8");
 
+    dlog(`OpenAI: sending request, bodyLen=${contentLen}`);
+
     const req = https.request({
       hostname: "api.openai.com",
       path: "/v1/chat/completions",
@@ -75,18 +83,31 @@ function callOpenAI(message) {
       let body = "";
       res.on("data", c => body += c.toString("utf8"));
       res.on("end", () => {
+        dlog(`OpenAI: response status=${res.statusCode}, bodyLen=${body.length}`);
         try {
           const j = JSON.parse(body);
           if (j.choices && j.choices[0]?.message?.content) {
             resolve({ success: true, text: j.choices[0].message.content });
           } else {
-            resolve({ success: false, error: j.error?.message || "OpenAI error" });
+            const errMsg = j.error?.message || JSON.stringify(j.error) || "Unknown OpenAI error";
+            dlog(`OpenAI error: ${errMsg}`);
+            resolve({ success: false, error: errMsg, status: res.statusCode });
           }
-        } catch { resolve({ success: false, error: "Invalid response" }); }
+        } catch(e) {
+          dlog(`OpenAI parse error: ${e.message}, body=${body.substring(0,200)}`);
+          resolve({ success: false, error: "Parse error: " + body.substring(0,100) });
+        }
       });
     });
-    req.on("error", e => resolve({ success: false, error: e.message }));
-    req.on("timeout", () => { req.destroy(); resolve({ success: false, error: "Timeout" }); });
+    req.on("error", e => {
+      dlog(`OpenAI request error: ${e.message}`);
+      resolve({ success: false, error: "Request error: " + e.message });
+    });
+    req.on("timeout", () => {
+      req.destroy();
+      dlog("OpenAI: timeout");
+      resolve({ success: false, error: "Timeout" });
+    });
     req.write(bodyData, "utf8");
     req.end();
   });
@@ -140,7 +161,14 @@ const server = http.createServer((req, res) => {
 
   if (req.url === "/api/status" && req.method === "GET") {
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ status: "ok", engine: USE_OPENAI ? "openai" : "gemini-fallback" }));
+    res.end(JSON.stringify({ status: "ok", engine: USE_OPENAI ? "openai" : "gemini-fallback", version: "2.2.0" }));
+    return;
+  }
+
+  // Debug endpoint to see recent logs
+  if (req.url === "/api/debug" && req.method === "GET") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ logs: debugLogs, openai_configured: USE_OPENAI, key_length: OPENAI_KEY.length }));
     return;
   }
 
@@ -160,28 +188,48 @@ const server = http.createServer((req, res) => {
         const start = Date.now();
         let reply = "";
         let source = "";
+        let errors = [];
 
         // Try OpenAI FIRST
         if (USE_OPENAI) {
+          dlog("Trying OpenAI...");
           try {
             const result = await callOpenAI(message);
-            if (result.success) { reply = result.text; source = "ChatGPT"; }
-          } catch (e) {}
+            if (result.success) {
+              reply = result.text;
+              source = "ChatGPT";
+              dlog("OpenAI success");
+            } else {
+              errors.push("OpenAI: " + result.error);
+              dlog("OpenAI failed: " + result.error);
+            }
+          } catch (e) {
+            errors.push("OpenAI: " + e.message);
+            dlog("OpenAI exception: " + e.message);
+          }
+        } else {
+          errors.push("OpenAI: not configured");
         }
 
         // Try Gemini as fallback
         if (!reply) {
+          dlog("Trying Gemini fallback...");
           for (const model of GEMINI_MODELS) {
             try {
               const result = await callGemini(model, message);
               if (result.success) { reply = result.text; source = "Gemini"; break; }
             } catch (e) {}
           }
+          if (!reply) errors.push("Gemini: all models failed");
         }
 
         if (!reply) {
           res.writeHead(503, { "Content-Type": "application/json" });
-          res.end(JSON.stringify({ error: "No AI engine available" }));
+          res.end(JSON.stringify({
+            error: "No AI engine available",
+            errors: errors,
+            debug: { openai_key_length: OPENAI_KEY.length, use_openai: USE_OPENAI }
+          }));
           return;
         }
 
