@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>JARVIS AI</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{background:#070714;color:#d0d0ff;font-family:-apple-system,BlinkMacSystemFont,sans-serif;height:100dvh;display:flex;flex-direction:column;overflow:hidden}
+.header{background:#12122a;padding:8px 12px;border-bottom:1px solid #1e1e4a;display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
+.header h1{font-size:16px;color:#60a5fa;letter-spacing:3px;text-shadow:0 0 10px rgba(96,165,250,0.3)}
+.header .st{font-size:10px;padding:3px 10px;border-radius:10px;font-weight:600}
+.st.ok{background:#1a3a2a;color:#4ade80}
+.st.err{background:#3a1a1a;color:#f87171}
+.st.load{background:#1a2a4a;color:#60a5fa}
+.st.wake{background:#3a2a1a;color:#fbbf24}
+.chat{flex:1;overflow-y:auto;padding:10px;display:flex;flex-direction:column;gap:8px}
+.msg{max-width:88%;padding:10px 14px;border-radius:16px;font-size:14px;line-height:1.45;word-break:break-word;animation:pop .25s ease}
+.msg.u{align-self:flex-end;background:#1d4ed8;color:#fff;border-bottom-right-radius:4px}
+.msg.a{align-self:flex-start;background:#161632;border:1px solid #222255;border-bottom-left-radius:4px}
+.msg .mt{font-size:10px;opacity:0.5;margin-top:4px}
+.input-row{padding:8px 10px;background:#12122a;border-top:1px solid #1e1e4a;display:flex;align-items:center;gap:6px;flex-shrink:0;padding-bottom:calc(8px + env(safe-area-inset-bottom))}
+.input-row input{flex:1;padding:10px 14px;border-radius:18px;border:1px solid #222255;background:#0a0a1e;color:#d0d0ff;font-size:15px;outline:none}
+.input-row input:focus{border-color:#2563eb}
+.input-row button{height:40px;padding:0 16px;border-radius:18px;border:none;background:#2563eb;color:#fff;font-size:13px;font-weight:600;cursor:pointer}
+.input-row button:disabled{opacity:0.4}
+.mic-btn{width:40px;height:40px;border-radius:50%;border:none;background:#1a3a2a;color:#4ade80;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.mic-btn.on{background:#3a1a1a;color:#f87171;animation:pu 1s infinite}
+.mic-btn.wake{background:#3a2a1a;color:#fbbf24;animation:glow 1.5s infinite}
+.typing{font-size:12px;color:#60a5fa;padding:4px 12px;font-style:italic}
+.wake-indicator{text-align:center;padding:6px;font-size:12px;color:#fbbf24;background:#1a1a0e;border-bottom:1px solid #2a2a1e;font-weight:600;letter-spacing:1px}
+.tts-toggle{text-align:center;padding:4px;font-size:11px;color:#888;background:#0a0a1a;border-bottom:1px solid #1a1a2a;display:flex;align-items:center;justify-content:center;gap:8px}
+.tts-toggle button{background:#1a2a1a;color:#4ade80;border:1px solid #2a4a2a;padding:3px 10px;border-radius:8px;font-size:11px;cursor:pointer}
+.tts-toggle button.off{background:#2a1a1a;color:#f87171;border-color:#4a2a2a}
+@keyframes pop{from{opacity:0;transform:scale(.92)}to{opacity:1;transform:scale(1)}}
+@keyframes pu{0%,100%{opacity:1}50%{opacity:.5}}
+@keyframes glow{0%,100%{box-shadow:0 0 5px #fbbf24}50%{box-shadow:0 0 15px #fbbf24}}
+@media(min-width:768px){.msg{max-width:65%}}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>J.A.R.V.I.S.</h1>
+  <span id="st" class="st ok">ONLINE</span>
+</div>
+<div id="ttsBar" class="tts-toggle">
+  <span>🔊 Voz JARVIS</span>
+  <button id="ttsBtn" onclick="toggleTTS()" class="">Activada</button>
+</div>
+<div id="wakeBar" class="wake-indicator" style="display:none">👂 ESCUCHANDO COMANDO...</div>
+<div id="chat" class="chat"></div>
+<div id="typing" class="typing" style="display:none">Procesando...</div>
+<div class="input-row">
+  <button id="mic" class="mic-btn" onclick="toggleMic()">🎤</button>
+  <input id="msg" type="text" placeholder="Escribí un comando..." autocomplete="off" enterkeyhint="send">
+  <button id="send" onclick="send()">Enviar</button>
+</div>
+
+<script>
+// === STATE ===
+let msgs=[],busy=false,micActive=false,listeningForCommand=false,recog=null;
+let ttsEnabled=true;let jarvisVoice=null;let voicesLoaded=false;
+let speechBuffer="";let silenceTimer=null;
+const SILENCE_MS=1800;
+try{msgs=JSON.parse(localStorage.getItem("jv")||"[]")}catch(e){msgs=[]}
+
+// === TTS SETUP (load voices properly) ===
+function loadVoices(){
+  if(!('speechSynthesis' in window)) return;
+  const voices=window.speechSynthesis.getVoices();
+  if(voices.length===0) return; // not ready yet
+
+  // Find best Spanish voice - prefer male/deep voices for JARVIS feel
+  const esVoices=voices.filter(v=>v.lang&&v.lang.startsWith('es'));
+  // Priority: Google ES male > Microsoft Pablo > Microsoft Raul > any ES
+  jarvisVoice=esVoices.find(v=>v.name.includes('Google')&&v.name.includes('es-ES'))
+    ||esVoices.find(v=>v.name.includes('Pablo'))
+    ||esVoices.find(v=>v.name.includes('Raul')||v.name.includes('Raúl'))
+    ||esVoices.find(v=>v.name.includes('Jorge'))
+    ||esVoices.find(v=>v.name.includes('Diego'))
+    ||esVoices.find(v=>v.name.includes('es-ES'))
+    ||esVoices.find(v=>v.name.includes('es-MX'))
+    ||esVoices.find(v=>v.name.includes('es-AR'))
+    ||esVoices[0];
+
+  voicesLoaded=true;
+  console.log("JARVIS voice:", jarvisVoice?jarvisVoice.name:"default");
+}
+
+if('speechSynthesis' in window){
+  loadVoices();
+  window.speechSynthesis.onvoiceschanged=loadVoices;
+}
+
+// === TTS TOGGLE ===
+function toggleTTS(){
+  ttsEnabled=!ttsEnabled;
+  const btn=document.getElementById("ttsBtn");
+  if(ttsEnabled){
+    btn.textContent="Activada";
+    btn.className="";
+    window.speechSynthesis.cancel();
+    speak("Voz activada, señor.");
+  }else{
+    btn.textContent="Desactivada";
+    btn.className="off";
+    window.speechSynthesis.cancel();
+  }
+  localStorage.setItem("jarvis_tts", ttsEnabled?"1":"0");
+}
+// Load saved preference
+try{ttsEnabled=localStorage.getItem("jarvis_tts")!=="0";}catch(e){}
+
+// === JARVIS VOICE (TTS with robotic effect) ===
+function speak(text){
+  if(!ttsEnabled) return;
+  if(!('speechSynthesis' in window)) return;
+
+  // Cancel any ongoing speech
+  window.speechSynthesis.cancel();
+
+  // Short texts don't need truncation
+  const cleanText=text.substring(0,350);
+
+  const utter=new SpeechSynthesisUtterance(cleanText);
+
+  // Language
+  utter.lang='es-ES';
+
+  // JARVIS voice settings: lower pitch, slightly faster = robotic feel
+  utter.pitch=0.65;  // lower = more masculine/grave
+  utter.rate=1.15;   // slightly faster, like JARVIS
+  utter.volume=1.0;
+
+  // Use selected voice
+  if(jarvisVoice) utter.voice=jarvisVoice;
+
+  // On iOS, speech must be triggered by user interaction
+  // This function is called after send() which IS a user action
+  window.speechSynthesis.speak(utter);
+}
+
+// === BEEP (JARVIS activation sound) ===
+function jarvisBeep(){
+  try{
+    const ctx=new (window.AudioContext||window.webkitAudioContext)();
+    // Dual-tone beep like JARVIS
+    const t=ctx.currentTime;
+    [880,1100].forEach((freq,i)=>{
+      const osc=ctx.createOscillator();
+      const gain=ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.type='sine';
+      osc.frequency.value=freq;
+      gain.gain.setValueAtTime(0.08,t+i*0.08);
+      gain.gain.exponentialRampToValueAtTime(0.001,t+i*0.08+0.15);
+      osc.start(t+i*0.08);
+      osc.stop(t+i*0.08+0.15);
+    });
+  }catch(e){}
+}
+
+// === INIT SPEECH RECOGNITION ===
+function init(){
+  if(!('webkitSpeechRecognition' in window||'SpeechRecognition' in window)){
+    showSt("SIN VOZ","err");
+    return;
+  }
+
+  const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+  recog=new SR();
+  recog.lang='es-ES';
+  recog.continuous=true;
+  recog.interimResults=true;
+  recog.maxAlternatives=1;
+
+  recog.onresult=function(e){
+    let interim="",final="";
+    for(let i=e.resultIndex;i<e.results.length;i++){
+      if(e.results[i].isFinal){
+        final+=e.results[i][0].transcript;
+      }else{
+        interim+=e.results[i][0].transcript;
+      }
+    }
+    if(interim&&listeningForCommand){
+      document.getElementById("msg").value=interim;
+    }
+    if(final){
+      handleFinalSpeech(final.trim());
+    }
+  };
+
+  recog.onerror=function(e){
+    if(e.error==="no-speech"||e.error==="aborted")return;
+    if(e.error==="audio-capture"){showSt("SIN MIC","err");return;}
+    if(e.error==="not-allowed"){showSt("PERMISO","err");return;}
+    restartMic(600);
+  };
+
+  recog.onend=function(){
+    if(micActive)restartMic(300);
+  };
+
+  render();
+  // Speak welcome only after user interaction (required by iOS)
+  document.body.addEventListener('click', function welcome(){
+    speak("JARVIS online. Listo para recibir órdenes, señor.");
+    document.body.removeEventListener('click', welcome);
+  }, {once:true});
+}
+
+// === HANDLE SPEECH ===
+function handleFinalSpeech(txt){
+  if(!txt)return;
+  if(listeningForCommand){
+    speechBuffer+=(speechBuffer?" ":"")+txt;
+    document.getElementById("msg").value=speechBuffer;
+    if(silenceTimer)clearTimeout(silenceTimer);
+    silenceTimer=setTimeout(()=>{
+      if(speechBuffer&&!busy){
+        const cmd=speechBuffer;speechBuffer="";
+        listeningForCommand=false;
+        hideWakeBar();updateMicBtn();
+        document.getElementById("msg").value=cmd;
+        send();
+      }
+    },SILENCE_MS);
+  }else if(/\bjarvis\b/i.test(txt)){
+    const cmd=txt.replace(/\bjarvis\b/gi,"").trim();
+    if(cmd){
+      document.getElementById("msg").value=cmd;
+      send();
+    }else{
+      startListeningForCommand();
+    }
+  }
+}
+
+function startListeningForCommand(){
+  listeningForCommand=true;speechBuffer="";
+  updateMicBtn();showSt("ESCUCHANDO","wake");
+  document.getElementById("wakeBar").style.display="block";
+  document.getElementById("msg").value="";
+  document.getElementById("msg").placeholder="Escuchando comando...";
+  jarvisBeep();
+}
+
+function hideWakeBar(){
+  document.getElementById("wakeBar").style.display="none";
+  document.getElementById("msg").placeholder="Escribí un comando...";
+}
+
+// === MIC CONTROL ===
+function toggleMic(){
+  if(!recog){alert("Usá Chrome o Safari para voz");return;}
+  micActive=!micActive;
+  if(micActive){
+    listeningForCommand=false;speechBuffer="";
+    updateMicBtn();showSt("ACTIVO","wake");
+    startMic();
+  }else{
+    listeningForCommand=false;speechBuffer="";
+    if(silenceTimer){clearTimeout(silenceTimer);silenceTimer=null;}
+    updateMicBtn();hideWakeBar();showSt("ONLINE","ok");
+    try{recog.stop()}catch(e){}
+  }
+}
+
+function startMic(){
+  try{recog.start();}catch(e){setTimeout(()=>{try{recog.start();}catch(e){}},500);}
+}
+function restartMic(delay){
+  if(!micActive)return;
+  try{recog.stop();}catch(e){}
+  setTimeout(()=>{try{recog.start();}catch(e){}},delay||300);
+}
+function updateMicBtn(){
+  const btn=document.getElementById("mic");
+  if(listeningForCommand){btn.className="mic-btn wake";btn.textContent="👂";}
+  else if(micActive){btn.className="mic-btn on";btn.textContent="●";}
+  else{btn.className="mic-btn";btn.textContent="🎤";}
+}
+
+// === RENDER ===
+function esc(s){const d=document.createElement("div");d.textContent=s;return d.innerHTML.replace(/\n/g,"<br>")}
+function tm(t){try{return new Date(t).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}catch(e){return""}}
+function render(){
+  const c=document.getElementById("chat");
+  if(msgs.length===0){
+    c.innerHTML='<div style="text-align:center;padding:30px 15px;opacity:.6"><h2 style="color:#60a5fa;font-size:16px;margin-bottom:6px">⚡ J.A.R.V.I.S.</h2><p style="font-size:12px">Decí <b>"JARVIS"</b> para activarme.<br>O escribí un comando.</p></div>';
+  }else{
+    c.innerHTML=msgs.map(m=>'<div class="msg '+(m.role==="user"?"u":"a")+'">'+esc(m.text)+'<div class="mt">'+(m.source||"")+" "+tm(m.t)+"</div></div>").join("");
+  }
+  c.scrollTop=c.scrollHeight;
+  try{localStorage.setItem("jv",JSON.stringify(msgs))}catch(e){}
+}
+function showSt(t,cls){const s=document.getElementById("st");s.textContent=t;s.className="st "+cls}
+
+// === SEND ===
+async function send(){
+  const inp=document.getElementById("msg");
+  const txt=inp.value.trim();
+  if(!txt||busy)return;
+
+  busy=true;inp.value="";
+  document.getElementById("send").disabled=true;
+  document.getElementById("typing").style.display="block";
+  showSt("PENSANDO...","load");
+  msgs.push({role:"user",text:txt,t:Date.now()});render();
+
+  try{
+    const ctrl=new AbortController();
+    setTimeout(()=>ctrl.abort(),15000);
+    const resp=await fetch("/api/chat",{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({message:txt}),
+      signal:ctrl.signal
+    });
+    document.getElementById("typing").style.display="none";
+    if(!resp.ok){
+      const err=await resp.json();
+      msgs.push({role:"assistant",text:"⚠️ "+(err.error||"Error"),source:"ERROR",t:Date.now()});
+      showSt("ERROR","err");
+    }else{
+      const data=await resp.json();
+      msgs.push({role:"assistant",text:data.reply,source:data.source||"JARVIS",t:Date.now()});
+      showSt(micActive?"ACTIVO":"ONLINE",micActive?"wake":"ok");
+      speak(data.reply);
+    }
+  }catch(e){
+    document.getElementById("typing").style.display="none";
+    const msg=e.name==="AbortError"?"Timeout de conexión":e.message;
+    msgs.push({role:"assistant",text:"⚠️ "+msg,source:"ERROR",t:Date.now()});
+    showSt("ERROR","err");
+  }
+
+  busy=false;document.getElementById("send").disabled=false;render();inp.focus();
+}
+
+document.getElementById("msg").addEventListener("keypress",e=>{if(e.key==="Enter")send()});
+init();
+</script>
+</body>
+</html>
